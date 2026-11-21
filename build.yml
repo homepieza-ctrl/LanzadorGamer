@@ -1,0 +1,843 @@
+# MI LAUNCHER GAMER - TODO EN UNO
+# Sube SOLO este archivo a tu repositorio de GitHub en la ruta:
+#   .github/workflows/build.yml
+# Luego ve a Actions > "Compilar Mi Launcher (todo en uno)" > Run workflow.
+# El proyecto completo (codigo, disenos y sonido de inicio) se crea dentro del flujo.
+name: Compilar Mi Launcher (todo en uno)
+
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - '.github/workflows/build.yml'
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Crear proyecto completo
+        run: |
+          set -e
+          mkdir -p app app/src/main app/src/main/java/com/mylauncher/gamer app/src/main/res/drawable app/src/main/res/layout app/src/main/res/values app/src/main/res/values-v28 gradle/wrapper tools app/src/main/res/raw
+          cat > .gitignore <<'EOF_FILE'
+          .gradle/
+          build/
+          local.properties
+          .idea/
+          *.iml
+          EOF_FILE
+          cat > app/build.gradle.kts <<'EOF_FILE'
+          plugins {
+              id("com.android.application")
+              id("org.jetbrains.kotlin.android")
+          }
+          android {
+              namespace = "com.mylauncher.gamer"
+              compileSdk = 34
+              defaultConfig {
+                  applicationId = "com.mylauncher.gamer"
+                  minSdk = 26
+                  targetSdk = 34
+                  versionCode = 1
+                  versionName = "1.0"
+              }
+              compileOptions {
+                  sourceCompatibility = JavaVersion.VERSION_17
+                  targetCompatibility = JavaVersion.VERSION_17
+              }
+              kotlinOptions { jvmTarget = "17" }
+          }
+          dependencies {
+              implementation("androidx.core:core-ktx:1.13.1")
+              implementation("androidx.appcompat:appcompat:1.7.0")
+              implementation("androidx.recyclerview:recyclerview:1.3.2")
+          }
+          EOF_FILE
+          cat > app/src/main/AndroidManifest.xml <<'EOF_FILE'
+          <?xml version="1.0" encoding="utf-8"?>
+          <manifest xmlns:android="http://schemas.android.com/apk/res/android">
+
+              <!-- Permite ver las apps instaladas que tienen icono de lanzamiento -->
+              <queries>
+                  <intent>
+                      <action android:name="android.intent.action.MAIN" />
+                      <category android:name="android.intent.category.LAUNCHER" />
+                  </intent>
+              </queries>
+
+              <application
+                  android:allowBackup="true"
+                  android:label="Mi Launcher"
+                  android:theme="@style/AppTheme">
+
+                  <!-- Siempre de costado -->
+                  <activity
+                      android:name=".MainActivity"
+                      android:exported="true"
+                      android:screenOrientation="sensorLandscape"
+                      android:launchMode="singleTask"
+                      android:stateNotNeeded="true"
+                      android:configChanges="orientation|screenSize|keyboardHidden|smallestScreenSize|screenLayout">
+                      <intent-filter>
+                          <action android:name="android.intent.action.MAIN" />
+                          <category android:name="android.intent.category.LAUNCHER" />
+                      </intent-filter>
+                      <!-- Permite usarlo como pantalla de inicio (launcher) -->
+                      <intent-filter>
+                          <action android:name="android.intent.action.MAIN" />
+                          <category android:name="android.intent.category.HOME" />
+                          <category android:name="android.intent.category.DEFAULT" />
+                      </intent-filter>
+                  </activity>
+              </application>
+          </manifest>
+          EOF_FILE
+          cat > app/src/main/java/com/mylauncher/gamer/MainActivity.kt <<'EOF_FILE'
+          package com.mylauncher.gamer
+
+          import android.content.Intent
+          import android.graphics.RenderEffect
+          import android.graphics.Shader
+          import android.media.MediaPlayer
+          import android.os.BatteryManager
+          import android.os.Build
+          import android.os.Bundle
+          import android.util.DisplayMetrics
+          import android.view.InputDevice
+          import android.view.KeyEvent
+          import android.view.LayoutInflater
+          import android.view.MotionEvent
+          import android.view.View
+          import android.view.ViewGroup
+          import android.widget.*
+          import androidx.activity.OnBackPressedCallback
+          import androidx.activity.result.contract.ActivityResultContracts
+          import androidx.appcompat.app.AlertDialog
+          import androidx.appcompat.app.AppCompatActivity
+          import androidx.core.view.WindowCompat
+          import androidx.core.view.WindowInsetsCompat
+          import androidx.core.view.WindowInsetsControllerCompat
+          import androidx.recyclerview.widget.LinearLayoutManager
+          import androidx.recyclerview.widget.LinearSmoothScroller
+          import androidx.recyclerview.widget.RecyclerView
+          import kotlin.math.abs
+
+          enum class Tab { RECENT, FAV, ALL }
+
+          class MainActivity : AppCompatActivity() {
+
+              private lateinit var games: MutableList<Game>
+              private var tab = Tab.RECENT
+              private var sel = 0
+              private var pendingPkg: String? = null
+              private var pendingName = ""
+              private var hatHeld = 0
+
+              private lateinit var rv: RecyclerView
+              private lateinit var lm: LinearLayoutManager
+              private lateinit var adapter: GameAdapter
+              private lateinit var bgCover: ImageView
+              private lateinit var tvName: TextView
+              private lateinit var btnPlay: TextView
+              private lateinit var btnFav: TextView
+              private lateinit var btnCover: TextView
+              private lateinit var btnDel: TextView
+              private lateinit var battery: TextView
+
+              private val pickCover = registerForActivityResult(ActivityResultContracts.GetContent()) { uri ->
+                  val pkg = pendingPkg
+                  pendingPkg = null
+                  if (pkg == null || uri == null) return@registerForActivityResult
+                  val path = Store.saveCover(this, uri, pkg)
+                  if (path == null) { toast("No se pudo leer la imagen"); return@registerForActivityResult }
+                  val ex = games.find { it.pkg == pkg }
+                  if (ex != null) { Store.deleteFile(ex.cover); ex.cover = path }
+                  else games.add(Game(pkg, pendingName, path, false, System.currentTimeMillis()))
+                  Store.save(this, games)
+                  tab = Tab.RECENT; sel = 0
+                  styleTabs(); refresh()
+              }
+
+              override fun onCreate(savedInstanceState: Bundle?) {
+                  super.onCreate(savedInstanceState)
+                  setContentView(R.layout.activity_main)
+                  immersive()
+                  games = Store.load(this)
+                  if (savedInstanceState == null) playStartup()
+                  val btnSound = findViewById<TextView>(R.id.btnSound)
+                  btnSound.alpha = if (soundOn()) 1f else 0.35f
+                  btnSound.setOnClickListener {
+                      val on = !soundOn()
+                      getSharedPreferences("cfg", 0).edit().putBoolean("sound", on).apply()
+                      btnSound.alpha = if (on) 1f else 0.35f
+                      if (on) playStartup()
+                  }
+
+                  bgCover = findViewById(R.id.bgCover)
+                  tvName = findViewById(R.id.tvName)
+                  btnPlay = findViewById(R.id.btnPlay)
+                  btnFav = findViewById(R.id.btnFav)
+                  btnCover = findViewById(R.id.btnCover)
+                  btnDel = findViewById(R.id.btnDel)
+                  battery = findViewById(R.id.battery)
+                  rv = findViewById(R.id.rv)
+
+                  if (Build.VERSION.SDK_INT >= 31) {
+                      bgCover.setRenderEffect(RenderEffect.createBlurEffect(40f, 40f, Shader.TileMode.CLAMP))
+                  }
+
+                  lm = LinearLayoutManager(this, LinearLayoutManager.HORIZONTAL, false)
+                  adapter = GameAdapter { pos -> onCardClick(pos) }
+                  rv.layoutManager = lm
+                  rv.adapter = adapter
+                  rv.itemAnimator = null
+                  rv.post {
+                      val pad = (rv.width - dp(121)) / 2
+                      rv.setPadding(pad, 0, pad, 0)
+                      refresh()
+                  }
+                  rv.addOnScrollListener(object : RecyclerView.OnScrollListener() {
+                      override fun onScrollStateChanged(r: RecyclerView, state: Int) {
+                          if (state != RecyclerView.SCROLL_STATE_IDLE) return
+                          val c = r.width / 2
+                          var best = -1; var bd = Int.MAX_VALUE
+                          for (i in 0 until r.childCount) {
+                              val v = r.getChildAt(i)
+                              val d = abs((v.left + v.right) / 2 - c)
+                              if (d < bd) { bd = d; best = r.getChildAdapterPosition(v) }
+                          }
+                          if (best >= 0 && best != sel) select(best)
+                          else if (best >= 0 && bd > 4) centerOn(best)
+                      }
+                  })
+
+                  findViewById<View>(R.id.tabRecent).setOnClickListener { setTab(Tab.RECENT) }
+                  findViewById<View>(R.id.tabFav).setOnClickListener { setTab(Tab.FAV) }
+                  findViewById<View>(R.id.tabAll).setOnClickListener { setTab(Tab.ALL) }
+                  btnPlay.setOnClickListener { current()?.let { launch(it) } }
+                  btnFav.setOnClickListener {
+                      current()?.let { it.fav = !it.fav; Store.save(this, games); if (tab == Tab.FAV) refresh() else updateInfo() }
+                  }
+                  btnCover.setOnClickListener {
+                      current()?.let { pendingPkg = it.pkg; pendingName = it.name; pickCover.launch("image/*") }
+                  }
+                  btnDel.setOnClickListener { current()?.let { confirmDelete(it) } }
+
+                  // Como launcher: el boton Atras no hace nada
+                  onBackPressedDispatcher.addCallback(this, object : OnBackPressedCallback(true) {
+                      override fun handleOnBackPressed() {}
+                  })
+                  styleTabs()
+              }
+
+              override fun onResume() {
+                  super.onResume()
+                  val bm = getSystemService(BATTERY_SERVICE) as BatteryManager
+                  battery.text = "▮ ${bm.getIntProperty(BatteryManager.BATTERY_PROPERTY_CAPACITY)}%"
+                  if (::adapter.isInitialized) refresh()
+              }
+
+              override fun onNewIntent(intent: Intent) {
+                  super.onNewIntent(intent)
+                  if (intent.action == Intent.ACTION_MAIN) { sel = 0; refresh() }  // boton Inicio
+              }
+
+              override fun onWindowFocusChanged(hasFocus: Boolean) {
+                  super.onWindowFocusChanged(hasFocus)
+                  if (hasFocus) immersive()
+              }
+
+              private fun immersive() {
+                  WindowCompat.setDecorFitsSystemWindows(window, false)
+                  WindowInsetsControllerCompat(window, window.decorView).apply {
+                      hide(WindowInsetsCompat.Type.systemBars())
+                      systemBarsBehavior = WindowInsetsControllerCompat.BEHAVIOR_SHOW_TRANSIENT_BARS_BY_SWIPE
+                  }
+              }
+
+              // ---------- Datos ----------
+              private fun visible(): List<Game> = when (tab) {
+                  Tab.FAV -> games.filter { it.fav }
+                  Tab.ALL -> games.sortedBy { it.name.lowercase() }
+                  Tab.RECENT -> games.sortedByDescending { it.last }
+              }
+
+              private fun current(): Game? = visible().getOrNull(sel)
+
+              private fun refresh() {
+                  val l = visible()
+                  sel = sel.coerceIn(0, l.size)
+                  adapter.items = l
+                  adapter.selected = sel
+                  adapter.notifyDataSetChanged()
+                  updateInfo()
+                  rv.post { centerOn(sel) }
+              }
+
+              private fun updateInfo() {
+                  val g = current()
+                  val has = g != null
+                  btnPlay.visibility = if (has) View.VISIBLE else View.GONE
+                  btnFav.visibility = if (has) View.VISIBLE else View.GONE
+                  btnCover.visibility = if (has) View.VISIBLE else View.GONE
+                  btnDel.visibility = if (has) View.VISIBLE else View.GONE
+                  if (g != null) {
+                      tvName.text = g.name
+                      btnFav.text = if (g.fav) "★ Quitar favorito" else "☆ Favorito"
+                      bgCover.setImageBitmap(Store.bitmap(g.cover))
+                  } else {
+                      tvName.text = if (tab == Tab.FAV) "Aún no tienes favoritos" else "Pulsa + para agregar un juego"
+                      bgCover.setImageBitmap(null)
+                  }
+              }
+
+              // ---------- Seleccion / movimiento ----------
+              private fun select(p: Int, center: Boolean = true) {
+                  val old = sel
+                  sel = p.coerceIn(0, visible().size)
+                  adapter.selected = sel
+                  if (old < adapter.itemCount) adapter.notifyItemChanged(old)
+                  adapter.notifyItemChanged(sel)
+                  updateInfo()
+                  if (center) centerOn(sel)
+              }
+
+              private fun move(d: Int) = select(sel + d)
+
+              private fun centerOn(pos: Int) {
+                  if (pos < 0 || pos >= adapter.itemCount) return
+                  val s = object : LinearSmoothScroller(this) {
+                      override fun calculateDtToFit(vs: Int, ve: Int, bs: Int, be: Int, snap: Int) =
+                          (bs + (be - bs) / 2) - (vs + (ve - vs) / 2)
+                      override fun calculateSpeedPerPixel(m: DisplayMetrics) = 60f / m.densityDpi
+                  }
+                  s.targetPosition = pos
+                  lm.startSmoothScroll(s)
+              }
+
+              private fun onCardClick(pos: Int) {
+                  if (pos == RecyclerView.NO_POSITION) return
+                  if (pos != sel) select(pos) else activate()
+              }
+
+              private fun activate() {
+                  val g = current()
+                  if (g == null) pickInstalledApp() else launch(g)
+              }
+
+              private fun launch(g: Game) {
+                  val i = packageManager.getLaunchIntentForPackage(g.pkg)
+                  if (i == null) { toast("${g.name} ya no está instalado"); return }
+                  g.last = System.currentTimeMillis()
+                  Store.save(this, games)
+                  startActivity(i)
+              }
+
+              // ---------- Agregar / eliminar ----------
+              private fun pickInstalledApp() {
+                  val pm = packageManager
+                  val intent = Intent(Intent.ACTION_MAIN).addCategory(Intent.CATEGORY_LAUNCHER)
+                  val apps = pm.queryIntentActivities(intent, 0)
+                      .map { it.activityInfo.packageName to it.loadLabel(pm).toString() }
+                      .filter { it.first != packageName && games.none { g -> g.pkg == it.first } }
+                      .distinctBy { it.first }
+                      .sortedBy { it.second.lowercase() }
+                  if (apps.isEmpty()) { toast("No hay más apps para agregar"); return }
+                  AlertDialog.Builder(this)
+                      .setTitle("Elige el juego instalado")
+                      .setItems(apps.map { it.second }.toTypedArray()) { _, w -> askName(apps[w].first, apps[w].second) }
+                      .setNegativeButton("Cancelar", null)
+                      .show()
+              }
+
+              private fun askName(pkg: String, label: String) {
+                  val et = EditText(this).apply { setText(label); setSelectAllOnFocus(true) }
+                  AlertDialog.Builder(this)
+                      .setTitle("Nombre del juego")
+                      .setView(et)
+                      .setPositiveButton("Elegir carátula") { _, _ ->
+                          pendingPkg = pkg
+                          pendingName = et.text.toString().ifBlank { label }
+                          pickCover.launch("image/*")
+                      }
+                      .setNegativeButton("Cancelar", null)
+                      .show()
+              }
+
+              private fun confirmDelete(g: Game) {
+                  AlertDialog.Builder(this)
+                      .setTitle("¿Quitar ${g.name} del launcher?")
+                      .setMessage("No se desinstala el juego.")
+                      .setPositiveButton("Quitar") { _, _ ->
+                          Store.deleteFile(g.cover)
+                          games.remove(g)
+                          Store.save(this, games)
+                          sel = (sel - 1).coerceAtLeast(0)
+                          refresh()
+                      }
+                      .setNegativeButton("Cancelar", null)
+                      .show()
+              }
+
+              // ---------- Pestanas ----------
+              private fun setTab(t: Tab) { tab = t; sel = 0; styleTabs(); refresh() }
+
+              private fun styleTabs() {
+                  val map = mapOf(R.id.tabRecent to Tab.RECENT, R.id.tabFav to Tab.FAV, R.id.tabAll to Tab.ALL)
+                  map.forEach { (id, t) ->
+                      findViewById<View>(id).setBackgroundResource(if (t == tab) R.drawable.tab_on else 0)
+                  }
+              }
+
+              // ---------- Control / teclado ----------
+              override fun onKeyDown(k: Int, e: KeyEvent): Boolean {
+                  when (k) {
+                      KeyEvent.KEYCODE_DPAD_RIGHT -> { move(1); return true }
+                      KeyEvent.KEYCODE_DPAD_LEFT -> { move(-1); return true }
+                      KeyEvent.KEYCODE_BUTTON_A, KeyEvent.KEYCODE_DPAD_CENTER, KeyEvent.KEYCODE_ENTER -> { activate(); return true }
+                  }
+                  return super.onKeyDown(k, e)
+              }
+
+              override fun onGenericMotionEvent(e: MotionEvent): Boolean {
+                  if ((e.source and InputDevice.SOURCE_JOYSTICK) != 0 && e.action == MotionEvent.ACTION_MOVE) {
+                      var x = e.getAxisValue(MotionEvent.AXIS_HAT_X)
+                      if (x == 0f) x = e.getAxisValue(MotionEvent.AXIS_X)
+                      val d = if (x > 0.6f) 1 else if (x < -0.6f) -1 else 0
+                      if (d != 0 && hatHeld == 0) move(d)
+                      hatHeld = d
+                      return true
+                  }
+                  return super.onGenericMotionEvent(e)
+              }
+
+              // ---------- Sonido de inicio ----------
+              private fun soundOn() = getSharedPreferences("cfg", 0).getBoolean("sound", true)
+
+              private fun playStartup() {
+                  if (!soundOn()) return
+                  try {
+                      val mp = MediaPlayer.create(this, R.raw.startup)
+                      mp?.setOnCompletionListener { it.release() }
+                      mp?.start()
+                  } catch (_: Exception) {}
+              }
+
+              private fun dp(v: Int) = (v * resources.displayMetrics.density).toInt()
+              private fun toast(t: String) = Toast.makeText(this, t, Toast.LENGTH_SHORT).show()
+          }
+
+          class GameAdapter(private val onClick: (Int) -> Unit) : RecyclerView.Adapter<GameAdapter.VH>() {
+              var items: List<Game> = emptyList()
+              var selected = 0
+
+              class VH(v: View) : RecyclerView.ViewHolder(v) {
+                  val cover: ImageView = v.findViewById(R.id.cover)
+                  val add: TextView = v.findViewById(R.id.add)
+                  val name: TextView = v.findViewById(R.id.name)
+                  val border: View = v.findViewById(R.id.border)
+              }
+
+              override fun getItemCount() = items.size + 1
+              override fun onCreateViewHolder(p: ViewGroup, t: Int) =
+                  VH(LayoutInflater.from(p.context).inflate(R.layout.item_game, p, false))
+
+              override fun onBindViewHolder(h: VH, pos: Int) {
+                  val isAdd = pos == items.size
+                  if (isAdd) {
+                      h.add.visibility = View.VISIBLE; h.name.text = ""; h.cover.setImageBitmap(null)
+                  } else {
+                      val g = items[pos]
+                      h.add.visibility = View.GONE; h.name.text = g.name; h.cover.setImageBitmap(Store.bitmap(g.cover))
+                  }
+                  val on = pos == selected
+                  h.border.visibility = if (on) View.VISIBLE else View.GONE
+                  h.itemView.animate().scaleX(if (on) 1.15f else 1f).scaleY(if (on) 1.15f else 1f).setDuration(150).start()
+                  h.itemView.elevation = if (on) 12f else 0f
+                  h.itemView.setOnClickListener { onClick(h.bindingAdapterPosition) }
+              }
+          }
+          EOF_FILE
+          cat > app/src/main/java/com/mylauncher/gamer/ParticlesView.kt <<'EOF_FILE'
+          package com.mylauncher.gamer
+
+          import android.content.Context
+          import android.graphics.Canvas
+          import android.graphics.Color
+          import android.graphics.Paint
+          import android.util.AttributeSet
+          import android.view.View
+          import kotlin.random.Random
+
+          /** Particulas brillantes (cian y rojo) que flotan hacia arriba. */
+          class ParticlesView @JvmOverloads constructor(c: Context, a: AttributeSet? = null) : View(c, a) {
+              private class P(var x: Float, var y: Float, val r: Float, val v: Float, val col: Int, val alpha: Int)
+
+              private val paint = Paint(Paint.ANTI_ALIAS_FLAG)
+              private val density = resources.displayMetrics.density
+              private val ps = List(45) {
+                  P(Random.nextFloat(), Random.nextFloat(), Random.nextFloat() * 2f + 0.8f, Random.nextFloat() * 0.0035f + 0.001f,
+                      if (Random.nextFloat() < 0.65f) Color.rgb(25, 211, 255) else Color.rgb(255, 45, 85),
+                      (Random.nextFloat() * 150 + 70).toInt())
+              }
+
+              override fun onDraw(canvas: Canvas) {
+                  for (p in ps) {
+                      p.y -= p.v
+                      if (p.y < 0f) { p.y = 1f; p.x = Random.nextFloat() }
+                      paint.color = p.col
+                      paint.alpha = p.alpha / 4
+                      canvas.drawCircle(p.x * width, p.y * height, p.r * density * 3f, paint)
+                      paint.alpha = p.alpha
+                      canvas.drawCircle(p.x * width, p.y * height, p.r * density, paint)
+                  }
+                  postInvalidateOnAnimation()
+              }
+          }
+          EOF_FILE
+          cat > app/src/main/java/com/mylauncher/gamer/Store.kt <<'EOF_FILE'
+          package com.mylauncher.gamer
+
+          import android.content.Context
+          import android.graphics.*
+          import android.net.Uri
+          import org.json.JSONArray
+          import org.json.JSONObject
+          import java.io.File
+          import java.io.FileOutputStream
+          import kotlin.math.max
+
+          data class Game(
+              val pkg: String,
+              var name: String,
+              var cover: String,
+              var fav: Boolean = false,
+              var last: Long = 0L
+          )
+
+          object Store {
+              private val cache = HashMap<String, Bitmap?>()
+
+              fun load(ctx: Context): MutableList<Game> {
+                  val out = mutableListOf<Game>()
+                  try {
+                      val arr = JSONArray(ctx.getSharedPreferences("games", 0).getString("list", "[]"))
+                      for (i in 0 until arr.length()) {
+                          val o = arr.getJSONObject(i)
+                          out.add(Game(o.getString("pkg"), o.getString("name"), o.getString("cover"), o.optBoolean("fav"), o.optLong("last")))
+                      }
+                  } catch (_: Exception) {}
+                  return out
+              }
+
+              fun save(ctx: Context, list: List<Game>) {
+                  val arr = JSONArray()
+                  list.forEach {
+                      arr.put(JSONObject().put("pkg", it.pkg).put("name", it.name).put("cover", it.cover)
+                          .put("fav", it.fav).put("last", it.last))
+                  }
+                  ctx.getSharedPreferences("games", 0).edit().putString("list", arr.toString()).apply()
+              }
+
+              fun bitmap(path: String): Bitmap? = cache.getOrPut(path) { BitmapFactory.decodeFile(path) }
+
+              fun deleteFile(path: String) { cache.remove(path); File(path).delete() }
+
+              /** Recorta la imagen a formato vertical 2:3 y la guarda en el almacenamiento interno. */
+              fun saveCover(ctx: Context, uri: Uri, key: String): String? {
+                  val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
+                  ctx.contentResolver.openInputStream(uri)?.use { BitmapFactory.decodeStream(it, null, bounds) }
+                  var s = 1
+                  while (bounds.outWidth / s > 1200) s *= 2
+                  val opts = BitmapFactory.Options().apply { inSampleSize = s }
+                  val src = ctx.contentResolver.openInputStream(uri)?.use { BitmapFactory.decodeStream(it, null, opts) } ?: return null
+                  val w = 400; val h = 600
+                  val scale = max(w / src.width.toFloat(), h / src.height.toFloat())
+                  val m = Matrix().apply {
+                      postScale(scale, scale)
+                      postTranslate((w - src.width * scale) / 2f, (h - src.height * scale) / 2f)
+                  }
+                  val out = Bitmap.createBitmap(w, h, Bitmap.Config.ARGB_8888)
+                  Canvas(out).drawBitmap(src, m, Paint(Paint.FILTER_BITMAP_FLAG))
+                  val f = File(ctx.filesDir, "cover_${key}_${System.currentTimeMillis()}.jpg")
+                  FileOutputStream(f).use { out.compress(Bitmap.CompressFormat.JPEG, 85, it) }
+                  return f.absolutePath
+              }
+          }
+          EOF_FILE
+          cat > app/src/main/res/drawable/bg_shade.xml <<'EOF_FILE'
+          <?xml version="1.0" encoding="utf-8"?>
+          <layer-list xmlns:android="http://schemas.android.com/apk/res/android">
+              <item><shape android:shape="rectangle">
+                  <gradient android:angle="315" android:startColor="#E60B1A2B" android:endColor="#8C0B1A2B"/>
+              </shape></item>
+              <item><shape android:shape="rectangle">
+                  <gradient android:type="radial" android:gradientRadius="520dp" android:centerX="0.1" android:centerY="0"
+                      android:startColor="#6019D3FF" android:endColor="#0019D3FF"/>
+              </shape></item>
+              <item><shape android:shape="rectangle">
+                  <gradient android:type="radial" android:gradientRadius="520dp" android:centerX="0.95" android:centerY="1"
+                      android:startColor="#66FF2D55" android:endColor="#00FF2D55"/>
+              </shape></item>
+          </layer-list>
+          EOF_FILE
+          cat > app/src/main/res/drawable/border_selected.xml <<'EOF_FILE'
+          <?xml version="1.0" encoding="utf-8"?>
+          <shape xmlns:android="http://schemas.android.com/apk/res/android" android:shape="rectangle">
+              <stroke android:width="2.5dp" android:color="#19D3FF"/><corners android:radius="6dp"/>
+          </shape>
+          EOF_FILE
+          cat > app/src/main/res/drawable/btn_ghost.xml <<'EOF_FILE'
+          <?xml version="1.0" encoding="utf-8"?>
+          <shape xmlns:android="http://schemas.android.com/apk/res/android" android:shape="rectangle">
+              <solid android:color="#33FFFFFF"/><corners android:radius="16dp"/>
+          </shape>
+          EOF_FILE
+          cat > app/src/main/res/drawable/btn_play.xml <<'EOF_FILE'
+          <?xml version="1.0" encoding="utf-8"?>
+          <shape xmlns:android="http://schemas.android.com/apk/res/android" android:shape="rectangle">
+              <gradient android:angle="0" android:startColor="#FF2D55" android:endColor="#FF6A3D"/>
+              <corners android:radius="5dp"/>
+          </shape>
+          EOF_FILE
+          cat > app/src/main/res/drawable/card_bg.xml <<'EOF_FILE'
+          <?xml version="1.0" encoding="utf-8"?>
+          <shape xmlns:android="http://schemas.android.com/apk/res/android" android:shape="rectangle">
+              <solid android:color="#14263B"/><corners android:radius="6dp"/>
+          </shape>
+          EOF_FILE
+          cat > app/src/main/res/drawable/tab_on.xml <<'EOF_FILE'
+          <?xml version="1.0" encoding="utf-8"?>
+          <shape xmlns:android="http://schemas.android.com/apk/res/android" android:shape="rectangle">
+              <solid android:color="#4019D3FF"/><corners android:radius="20dp"/>
+          </shape>
+          EOF_FILE
+          cat > app/src/main/res/layout/activity_main.xml <<'EOF_FILE'
+          <?xml version="1.0" encoding="utf-8"?>
+          <FrameLayout xmlns:android="http://schemas.android.com/apk/res/android"
+              android:layout_width="match_parent" android:layout_height="match_parent"
+              android:background="#0B1A2B">
+
+              <ImageView android:id="@+id/bgCover" android:layout_width="match_parent" android:layout_height="match_parent"
+                  android:scaleType="centerCrop" android:alpha="0.55"/>
+              <View android:layout_width="match_parent" android:layout_height="match_parent"
+                  android:background="@drawable/bg_shade"/>
+              <com.mylauncher.gamer.ParticlesView android:layout_width="match_parent" android:layout_height="match_parent"/>
+
+              <LinearLayout android:layout_width="match_parent" android:layout_height="match_parent"
+                  android:orientation="vertical" android:paddingStart="28dp" android:paddingEnd="28dp"
+                  android:paddingTop="10dp" android:paddingBottom="8dp">
+
+                  <LinearLayout android:layout_width="match_parent" android:layout_height="wrap_content"
+                      android:orientation="horizontal" android:gravity="center_vertical">
+                      <TextView android:id="@+id/tabRecent" style="@style/Tab" android:text="RECIENTES"/>
+                      <TextView android:id="@+id/tabFav" style="@style/Tab" android:text="FAVORITOS"/>
+                      <TextView android:id="@+id/tabAll" style="@style/Tab" android:text="TODOS"/>
+                      <View android:layout_width="0dp" android:layout_height="1dp" android:layout_weight="1"/>
+                      <TextView android:id="@+id/btnSound" android:layout_width="wrap_content" android:layout_height="wrap_content"
+                          android:padding="6dp" android:layout_marginEnd="10dp" android:text="♪"
+                          android:textColor="#19D3FF" android:textSize="20sp" android:textStyle="bold"/>
+                      <TextClock android:id="@+id/clock" android:layout_width="wrap_content" android:layout_height="wrap_content"
+                          android:format12Hour="h:mm a" android:format24Hour="h:mm a"
+                          android:textColor="#FFFFFF" android:textSize="16sp" android:textStyle="bold"/>
+                      <TextView android:id="@+id/battery" android:layout_width="wrap_content" android:layout_height="wrap_content"
+                          android:layout_marginStart="14dp" android:textColor="#19D3FF" android:textSize="14sp" android:textStyle="bold"/>
+                  </LinearLayout>
+
+                  <LinearLayout android:layout_width="wrap_content" android:layout_height="wrap_content"
+                      android:layout_marginTop="6dp" android:orientation="horizontal" android:gravity="center_vertical">
+                      <View android:layout_width="4dp" android:layout_height="16dp" android:background="#FF2D55"/>
+                      <TextView android:layout_width="wrap_content" android:layout_height="wrap_content"
+                          android:layout_marginStart="8dp" android:text="JUEGOS RECIENTES"
+                          android:textColor="#FFFFFF" android:textSize="14sp" android:textStyle="bold"
+                          android:letterSpacing="0.2" android:fontFamily="sans-serif-condensed"/>
+                  </LinearLayout>
+
+                  <androidx.recyclerview.widget.RecyclerView android:id="@+id/rv"
+                      android:layout_width="match_parent" android:layout_height="190dp"
+                      android:clipToPadding="false" android:clipChildren="false"/>
+
+                  <TextView android:id="@+id/tvName" android:layout_width="wrap_content" android:layout_height="wrap_content"
+                      android:textColor="#FFFFFF" android:textSize="20sp" android:textStyle="bold"
+                      android:fontFamily="sans-serif-condensed" android:shadowColor="#19D3FF" android:shadowRadius="14"/>
+
+                  <LinearLayout android:layout_width="match_parent" android:layout_height="wrap_content"
+                      android:layout_marginTop="4dp" android:orientation="horizontal" android:gravity="center_vertical">
+                      <TextView android:id="@+id/btnPlay" android:layout_width="wrap_content" android:layout_height="wrap_content"
+                          android:background="@drawable/btn_play" android:paddingStart="22dp" android:paddingEnd="22dp"
+                          android:paddingTop="8dp" android:paddingBottom="8dp" android:text="▶  ¡JUGAR AHORA!"
+                          android:textColor="#FFFFFF" android:textStyle="bold" android:textSize="15sp" android:letterSpacing="0.08"/>
+                      <TextView android:id="@+id/btnFav" style="@style/Ghost" android:text="☆ Favorito"/>
+                      <TextView android:id="@+id/btnCover" style="@style/Ghost" android:text="Carátula"/>
+                      <TextView android:id="@+id/btnDel" style="@style/Ghost" android:text="Eliminar"/>
+                  </LinearLayout>
+              </LinearLayout>
+          </FrameLayout>
+          EOF_FILE
+          cat > app/src/main/res/layout/item_game.xml <<'EOF_FILE'
+          <?xml version="1.0" encoding="utf-8"?>
+          <FrameLayout xmlns:android="http://schemas.android.com/apk/res/android"
+              android:layout_width="105dp" android:layout_height="158dp"
+              android:layout_margin="8dp">
+              <ImageView android:id="@+id/cover" android:layout_width="match_parent" android:layout_height="match_parent"
+                  android:scaleType="centerCrop" android:background="@drawable/card_bg" android:clipToOutline="true"/>
+              <TextView android:id="@+id/add" android:layout_width="match_parent" android:layout_height="match_parent"
+                  android:gravity="center" android:text="+" android:textColor="#FFFFFF" android:textSize="40sp"
+                  android:visibility="gone"/>
+              <TextView android:id="@+id/name" android:layout_width="match_parent" android:layout_height="wrap_content"
+                  android:layout_gravity="bottom" android:gravity="center" android:padding="6dp"
+                  android:textColor="#FFFFFF" android:textSize="12sp" android:textStyle="bold"
+                  android:shadowColor="#000000" android:shadowRadius="6" android:shadowDx="0" android:shadowDy="1"/>
+              <View android:id="@+id/border" android:layout_width="match_parent" android:layout_height="match_parent"
+                  android:background="@drawable/border_selected" android:visibility="gone"/>
+          </FrameLayout>
+          EOF_FILE
+          cat > app/src/main/res/values-v28/themes.xml <<'EOF_FILE'
+          <resources>
+              <style name="AppTheme" parent="Theme.AppCompat.NoActionBar">
+                  <item name="android:windowBackground">#0B1A2B</item>
+                  <item name="android:statusBarColor">@android:color/transparent</item>
+                  <item name="android:navigationBarColor">@android:color/transparent</item>
+                  <item name="android:windowLayoutInDisplayCutoutMode">shortEdges</item>
+              </style>
+          </resources>
+          EOF_FILE
+          cat > app/src/main/res/values/styles.xml <<'EOF_FILE'
+          <resources>
+              <style name="Tab">
+                  <item name="android:layout_width">wrap_content</item>
+                  <item name="android:layout_height">wrap_content</item>
+                  <item name="android:paddingStart">14dp</item>
+                  <item name="android:paddingEnd">14dp</item>
+                  <item name="android:paddingTop">6dp</item>
+                  <item name="android:paddingBottom">6dp</item>
+                  <item name="android:textColor">#FFFFFF</item>
+                  <item name="android:textSize">12sp</item>
+                  <item name="android:textStyle">bold</item>
+                  <item name="android:letterSpacing">0.1</item>
+              </style>
+              <style name="Ghost">
+                  <item name="android:layout_width">wrap_content</item>
+                  <item name="android:layout_height">wrap_content</item>
+                  <item name="android:layout_marginStart">10dp</item>
+                  <item name="android:background">@drawable/btn_ghost</item>
+                  <item name="android:paddingStart">12dp</item>
+                  <item name="android:paddingEnd">12dp</item>
+                  <item name="android:paddingTop">6dp</item>
+                  <item name="android:paddingBottom">6dp</item>
+                  <item name="android:textColor">#FFFFFF</item>
+                  <item name="android:textSize">12sp</item>
+              </style>
+          </resources>
+          EOF_FILE
+          cat > app/src/main/res/values/themes.xml <<'EOF_FILE'
+          <resources>
+              <style name="AppTheme" parent="Theme.AppCompat.NoActionBar">
+                  <item name="android:windowBackground">#0B1A2B</item>
+                  <item name="android:statusBarColor">@android:color/transparent</item>
+                  <item name="android:navigationBarColor">@android:color/transparent</item>
+              </style>
+          </resources>
+          EOF_FILE
+          cat > build.gradle.kts <<'EOF_FILE'
+          plugins {
+              id("com.android.application") version "8.5.2" apply false
+              id("org.jetbrains.kotlin.android") version "1.9.24" apply false
+          }
+          EOF_FILE
+          cat > gradle.properties <<'EOF_FILE'
+          org.gradle.jvmargs=-Xmx2048m -Dfile.encoding=UTF-8
+          android.useAndroidX=true
+          kotlin.code.style=official
+          EOF_FILE
+          cat > gradle/wrapper/gradle-wrapper.properties <<'EOF_FILE'
+          distributionBase=GRADLE_USER_HOME
+          distributionPath=wrapper/dists
+          distributionUrl=https\://services.gradle.org/distributions/gradle-8.7-bin.zip
+          zipStoreBase=GRADLE_USER_HOME
+          zipStorePath=wrapper/dists
+          EOF_FILE
+          cat > settings.gradle.kts <<'EOF_FILE'
+          pluginManagement { repositories { google(); mavenCentral(); gradlePluginPortal() } }
+          dependencyResolutionManagement {
+              repositoriesMode.set(RepositoriesMode.FAIL_ON_PROJECT_REPOS)
+              repositories { google(); mavenCentral() }
+          }
+          rootProject.name = "MiLauncher"
+          include(":app")
+          EOF_FILE
+          cat > tools/make_startup_sound.py <<'EOF_FILE'
+          import wave, math, struct, os, sys
+          SR = 22050
+          DUR = 5.0
+          N = int(SR * DUR)
+          buf = [0.0] * N
+          TAU = 2 * math.pi
+
+          # Acorde etereo (Re mayor add9) que crece lento
+          voices = [(73.42, 0.0, 0.30), (110.0, 0.15, 0.26), (146.83, 0.30, 0.22), (185.0, 0.45, 0.18),
+                    (220.0, 0.60, 0.16), (293.66, 0.80, 0.12), (329.63, 1.00, 0.10), (440.0, 1.20, 0.08)]
+          for f, st, amp in voices:
+              for i in range(int(st * SR), N):
+                  t = i / SR - st
+                  e = min(1.0, t / 1.5) * math.exp(-max(0.0, t - 1.9) * 0.6)
+                  v = (math.sin(TAU * f * t) + 0.5 * math.sin(TAU * f * 1.003 * t)
+                       + 0.30 * math.sin(TAU * f * 2 * t + 0.4) + 0.12 * math.sin(TAU * f * 3 * t))
+                  buf[i] += amp * e * v
+
+          # Destellos tipo campana
+          for f, st in [(1174.66, 1.55), (1479.98, 1.85), (1760.0, 2.15), (2349.3, 2.45)]:
+              for i in range(int(st * SR), N):
+                  t = i / SR - st
+                  e = math.exp(-t * 2.6) * min(1.0, t / 0.01)
+                  v = math.sin(TAU * f * t) + 0.4 * math.sin(TAU * f * 2.76 * t)
+                  buf[i] += 0.07 * e * v
+
+          # Reverb simple (peines)
+          wet = [0.0] * N
+          for d, g in [(0.0297, 0.72), (0.0371, 0.70), (0.0411, 0.68), (0.0437, 0.66)]:
+              D = int(d * SR)
+              line = [0.0] * N
+              for i in range(N):
+                  x = buf[i] + (line[i - D] * g if i >= D else 0.0)
+                  line[i] = x
+                  wet[i] += x * 0.22
+          out = [buf[i] * 0.6 + wet[i] for i in range(N)]
+
+          # Fundido final + normalizar
+          fade = int(0.7 * SR)
+          for i in range(fade):
+              out[N - 1 - i] *= i / fade
+          peak = max(abs(x) for x in out) or 1.0
+          out = [x / peak * 0.85 for x in out]
+
+          path = sys.argv[1] if len(sys.argv) > 1 else "startup.wav"
+          os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
+          with wave.open(path, "wb") as w:
+              w.setnchannels(1); w.setsampwidth(2); w.setframerate(SR)
+              w.writeframes(b"".join(struct.pack("<h", int(x * 32767)) for x in out))
+          print("Sonido creado:", path)
+          EOF_FILE
+
+      - name: Generar sonido de inicio
+        run: python3 tools/make_startup_sound.py app/src/main/res/raw/startup.wav
+
+      - name: Instalar Java 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 17
+
+      - name: Instalar Gradle
+        uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: 8.7
+
+      - name: Compilar APK
+        run: gradle assembleDebug --no-daemon
+
+      - name: Guardar APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: MiLauncher-APK
+          path: app/build/outputs/apk/debug/app-debug.apk
